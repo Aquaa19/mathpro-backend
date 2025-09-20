@@ -2,44 +2,53 @@
 # LOCATION: mathpro-backend/solver.py
 
 import sympy
+import re
+
+def normalize_expression(expr: str) -> str:
+    """
+    Cleans up a user-input string to be compatible with SymPy.
+    - Replaces superscript characters (², ³) with caret notation (^2, ^3).
+    - Replaces caret notation (x^2) with Python's power operator (x**2).
+    """
+    # Dictionary to map superscript characters to standard form
+    superscript_map = {
+        '²': '^2', '³': '^3', '¹': '^1', '⁰': '^0',
+        '⁴': '^4', '⁵': '^5', '⁶': '^6', '⁷': '^7',
+        '⁸': '^8', '⁹': '^9'
+    }
+
+    # First pass: replace all superscripts
+    for sup, std in superscript_map.items():
+        expr = expr.replace(sup, std)
+    
+    # Second pass: use a regular expression to replace x^2 with x**2
+    # This is safer than a simple replace('^', '**')
+    # It looks for a character/number followed by ^ and a number
+    expr = re.sub(r'(\w+)\^(\d+)', r'\1**\2', expr)
+    
+    return expr
 
 def solve_differential_equation(expression_str: str):
     """
     Solves a simple, first-order ordinary differential equation string.
-    
-    Args:
-        expression_str: A string representing the equation, e.g., "dy/dx = x**2".
-
-    Returns:
-        A dictionary containing the solution summary and steps,
-        or an error dictionary if solving fails.
     """
     try:
-        # Define the necessary mathematical symbols
+        # 1. Normalize the user's input first!
+        normalized_expr = normalize_expression(expression_str)
+        
+        # 2. Define the mathematical symbols
         x = sympy.Symbol('x')
         y = sympy.Function('y')(x)
         
-        # Prepare the equation parts from the input string
-        # IMPORTANT: SymPy's sympify can be a security risk in a production
-        # environment if not used with care. For this project, it's okay.
-        lhs_str, rhs_str = expression_str.replace(" ", "").split('=')
+        # 3. Prepare the equation parts from the normalized string
+        lhs_str, rhs_str = normalized_expr.replace(" ", "").split('=')
         
-        # Convert the string parts into SymPy expressions
-        # We need to replace "dy/dx" with how SymPy understands derivatives: y.diff(x)
         lhs_sympy = sympy.sympify(lhs_str.replace("dy/dx", "y.diff(x)"), locals={'y': y, 'x': x})
         rhs_sympy = sympy.sympify(rhs_str, locals={'y': y, 'x': x})
         
-        # Create the equation object
         equation = sympy.Eq(lhs_sympy, rhs_sympy)
-        
-        # Solve the differential equation
         solution = sympy.dsolve(equation, y)
         
-        # Format the solution into the structure our Android app expects
-        # NOTE: Generating intermediate steps is a very complex problem.
-        # For this server, we will provide the initial and final steps.
-        
-        # Convert SymPy expressions back to LaTeX strings for the app
         solution_latex = sympy.latex(solution)
         problem_latex = sympy.latex(equation)
         
@@ -61,7 +70,6 @@ def solve_differential_equation(expression_str: str):
         return result
 
     except Exception as e:
-        # If anything goes wrong (e.g., parsing error), return an error message
         return {
             "error": f"Failed to solve equation: {str(e)}"
         }
