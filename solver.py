@@ -4,23 +4,24 @@
 import re
 import sympy
 
-# --- Normalization ---------------------------------------------------------
-
+# ===== REPLACEMENT: normalize_expression =====
 def normalize_expression(expr: str) -> str:
     """
-    Cleans up a user-input string to be more compatible with SymPy using a multi-pass approach.
-    - Handles unicode superscripts and sqrt, primes (y', y''), and Leibniz d^n y / dx^n notations.
-    - Inserts implicit multiplication signs for common cases.
-    - Converts '^' to '**'.
-    Returns a string suitable for sympy.sympify / sympy.parse_expr (with appropriate locals).
+    Clean and normalize a user input string into something SymPy-friendly.
+    - maps common unicode superscripts and sqrt,
+    - replaces prime and Leibniz derivative notations with SymPy Derivative(...) text,
+    - inserts a limited set of implicit multiplications,
+    - converts ^ to **,
+    - returns a string ready for sympy.sympify with appropriate locals.
     """
+    import re
+
     if not isinstance(expr, str):
         raise TypeError("expr must be a string")
 
-    # 0. Remove extra spaces (but keep spaces needed by regex detection)
     expr = expr.strip()
 
-    # Pass 1: Map common Unicode characters to ASCII forms
+    # Map unicode to ascii/plain forms
     char_map = {
         '²': '^2', '³': '^3', '¹': '^1', '⁰': '^0', '⁴': '^4', '⁵': '^5',
         '⁶': '^6', '⁷': '^7', '⁸': '^8', '⁹': '^9',
@@ -30,13 +31,10 @@ def normalize_expression(expr: str) -> str:
     for k, v in char_map.items():
         expr = expr.replace(k, v)
 
-    # Remove stray spaces around operators to make recognition simpler
-    expr = re.sub(r'\s+', ' ', expr)
-    expr = re.sub(r'\s*([+\-*/=^(),])\s*', r'\1', expr)
-    # Now remove remaining leading/trailing spaces
-    expr = expr.strip()
+    # Normalize whitespace
+    expr = re.sub(r'\s+', ' ', expr).strip()
 
-    # Pass 2: Replace derivative notations with placeholders safely using re.sub with callback
+    # --- Replace Leibniz style derivatives like dy/dx or d^2 y / dx^2 ---
     deriv_map = {}
     counter = 0
 
@@ -46,17 +44,11 @@ def normalize_expression(expr: str) -> str:
         counter += 1
         return ph
 
-    # Pattern A: Leibniz style d^n y / dx^n  (allow optional ^, optional spaces, digits for n)
-    # Examples matched: "dy/dx", "d^2y/dx^2", "d 3 y / dx3" (with spaces), but we normalize common forms.
-    pattern_leibniz = re.compile(
-        r'd\^?\s*(\d+)?\s*y\s*/\s*dx\^?\s*(\d+)?', flags=re.IGNORECASE
-    )
+    pattern_leibniz = re.compile(r'd\^?\s*(\d+)?\s*y\s*/\s*dx\^?\s*(\d+)?', flags=re.IGNORECASE)
 
-    def _replace_leibaut(match):
-        n1 = match.group(1)
-        n2 = match.group(2)
-        # determine order: prefer numeric capture, default to 1
-        n = None
+    def _replace_leibniz(m):
+        n1 = m.group(1)
+        n2 = m.group(2)
         if n1 and n1.isdigit():
             n = int(n1)
         elif n2 and n2.isdigit():
@@ -67,14 +59,13 @@ def normalize_expression(expr: str) -> str:
         deriv_map[ph] = f"Derivative(y(x),(x,{n}))" if n != 1 else "Derivative(y(x),x)"
         return ph
 
-    expr = pattern_leibniz.sub(_replace_leibaut, expr)
+    expr = pattern_leibniz.sub(_replace_leibniz, expr)
 
-    # Pattern B: Prime notation y', y'', y''' (one or more ASCII single quotes)
-    # Capture sequences like y', y''', etc. (we assume variable named exactly 'y' — extendable)
+    # --- Replace prime notation y', y'' etc. ---
     pattern_primes = re.compile(r"y('{1,})")
 
-    def _replace_primes(match):
-        quotes = match.group(1)
+    def _replace_primes(m):
+        quotes = m.group(1)
         n = len(quotes)
         ph = new_placeholder()
         deriv_map[ph] = f"Derivative(y(x),(x,{n}))" if n != 1 else "Derivative(y(x),x)"
@@ -82,38 +73,35 @@ def normalize_expression(expr: str) -> str:
 
     expr = pattern_primes.sub(_replace_primes, expr)
 
-    # Pass 3: Insert implicit multiplications
-    # We'll treat common functions/identifiers as atomic tokens (prevent injecting * inside them)
-    # Allowed function names (you can extend this set as needed)
+    # --- Insert simple implicit multiplications ---
+    # Keep this conservative to avoid breaking function names
     func_names = r'(?:sin|cos|tan|log|exp|sqrt|Derivative|__DERIV_\d+__)'
-    # Insert between number and var/func/(
-    expr = re.sub(r'(?P<num>(?<![A-Za-z_])\d+(?:\.\d+)?))(?P<f>(?:[A-Za-z_]\w*|' + func_names + r'|\())',
-                  r'\g<num>*\g<f>', expr)
-    # Insert between closing parenthesis or variable and open parenthesis, function, or variable
-    # (e.g., ')(', 'x(', 'x y', ')x', ')sin')
-    expr = re.sub(r'(?P<left>[A-Za-z0-9_)\]])(?P<right>(?:\(|' + func_names + r'|[A-Za-z_]))',
-                  r'\g<left>*\g<right>', expr)
 
-    # Handle derivative placeholders specifically: ensure they are treated atomically with surrounding text
-    # e.g., "__DERIV_0__y" -> "__DERIV_0__*y"
+    # between number and identifier or '('
+    expr = re.sub(
+        rf'(?P<num>(?<![A-Za-z_])\d+(?:\.\d+)?)(?P<next>(?:{func_names}|[A-Za-z_]\w*|\())',
+        r'\g<num>*\g<next>', expr)
+
+    # between closing bracket/identifier and opening bracket/identifier
+    expr = re.sub(
+        rf'(?P<left>(?:[A-Za-z0-9_)\]]|__DERIV_\d+__))(?P<right>(?:\(|{func_names}|[A-Za-z_]))',
+        r'\g<left>*\g<right>', expr)
+
+    # derivative placeholders atomization
     expr = re.sub(r'(__DERIV_\d+__)(?=[A-Za-z_(])', r'\1*', expr)
     expr = re.sub(r'(?<=[A-Za-z0-9_)])(__DERIV_\d+__)', r'*\1', expr)
 
-    # Pass 4: Convert caret to Python exponent
-    expr = expr.replace("^", "**")
+    # caret to python power
+    expr = expr.replace('^', '**')
 
-    # Pass 5: Replace placeholders back to SymPy text
-    # Do replacements in a way that avoids accidental partial replacements
-    # (longer placeholders first — though our placeholders are uniform)
+    # replace placeholders with derivative text
     for ph, sym_text in deriv_map.items():
         expr = expr.replace(ph, sym_text)
 
-    # Final cleanup: collapse multiple stars from previous heuristics and remove accidental spaces
-    expr = re.sub(r'\*\*', '**', expr)
-    expr = re.sub(r'\*\*', '**', expr)
+    # final cleanup: remove accidental spaces
     expr = re.sub(r'\s+', '', expr)
-
     return expr
+
 
 # --- Step-by-Step Solvers -------------------------------------------------
 
@@ -319,226 +307,299 @@ def _solve_clairaut_step_by_step(eq, y, x, p):
 
 # --- REPLACED: linear constant-coefficient solver (with PI by undetermined coefficients) ---
 
+# ===== REPLACEMENT: _solve_linear_constant_coeff_step_by_step =====
 def _solve_linear_constant_coeff_step_by_step(eq, y, x):
     """
-    Solves n-th order linear ODEs with constant coefficients using the
-    Method of Undetermined Coefficients for the particular integral.
+    Robust solver for linear ODEs with constant coefficients.
+    - constructs auxiliary polynomial for complementary function
+    - builds a reasonable particular integral guess and solves coefficients:
+      * symbolic matching for poly/exp/trig
+      * numeric least-squares fallback
+    Returns a dict with 'solution_summary' and 'steps'.
     """
     steps = []
-    C_symbols = [sympy.Symbol(f'C{i+1}') for i in range(10)]
+    # Prepare C symbols for CF
+    C_symbols = [sympy.Symbol(f'C{i+1}') for i in range(12)]
 
-    # --- Part 1: Find the Complementary Function (CF) ---
-    rearranged = eq.lhs - eq.rhs
-    lhs_op_expr = sympy.S(0)
+    # Separate left (operator on y) and right (f(x))
+    expr = sympy.simplify(eq.lhs - eq.rhs)
+    # Build lhs_op: collect terms that contain y or its derivatives
+    lhs_op = sympy.S(0)
     rhs_fx = sympy.S(0)
-
-    for term in sympy.Add.make_args(rearranged.expand()):
-        if term.has(y):
-            lhs_op_expr += term
+    for a in sympy.Add.make_args(expr.expand()):
+        if a.has(y):
+            lhs_op += a
         else:
-            rhs_fx -= term # Move non-y terms to the right-hand side
+            rhs_fx -= a  # move to right side
 
-    m = sympy.Symbol('m')
+    # Determine highest derivative order present
     max_order = 0
-    y_derivs = [y.diff(x, n) for n in range(20, -1, -1)]
-    for deriv in y_derivs:
-        if lhs_op_expr.has(deriv):
-            max_order = len(deriv.args) - 1 if isinstance(deriv, sympy.Derivative) else 0
-            break
-            
-    aux_poly_terms = []
+    for n in range(0, 21):
+        if lhs_op.has(y.diff(x, n)):
+            max_order = n
+
+    if max_order == 0 and not lhs_op.has(y):
+        raise ValueError("No y or derivatives found on LHS — cannot form auxiliary equation.")
+
+    # Build auxiliary polynomial in m: sum coeff_n * m^n
+    m = sympy.symbols('m')
+    aux_poly = sympy.Integer(0)
     for n in range(max_order, -1, -1):
-        deriv = y.diff(x, n) if n > 0 else y
-        coeff = lhs_op_expr.expand().coeff(deriv)
-        if x in coeff.free_symbols or y.func in coeff.free_symbols:
-            raise ValueError(f"Non-constant coefficient '{coeff}' found.")
+        term = y.diff(x, n) if n > 0 else y
+        coeff = sympy.simplify(lhs_op.expand().coeff(term, 1))
+        # reject non-constant coefficients
+        if coeff != 0 and x in coeff.free_symbols:
+            raise ValueError("Non-constant coefficient detected; this solver only handles constant-coefficient ODEs.")
         if coeff != 0:
-            aux_poly_terms.append(coeff * m**n)
+            aux_poly += sympy.simplify(coeff) * m**n
 
-    if not aux_poly_terms:
-        raise ValueError("Could not form an auxiliary equation.")
+    if aux_poly == 0:
+        raise ValueError("Auxiliary polynomial is zero; cannot proceed.")
 
-    aux_eq_poly = sum(aux_poly_terms)
-    aux_eq = sympy.Eq(aux_eq_poly, 0)
+    # Auxiliary equation and its roots
     steps.append({
-        "rule_name": "Step 1: Find the Complementary Function (y_c)",
-        "result": "First, solve the homogeneous equation: " + sympy.latex(sympy.Eq(lhs_op_expr, 0)),
-        "explanation": "The general solution is y = y_c + y_p, where y_c is the Complementary Function and y_p is the Particular Integral."
-    })
-    steps.append({
-        "rule_name": "Form the Auxiliary Equation",
-        "result": sympy.latex(aux_eq),
-        "explanation": "Substitute y = e^(mx) into the homogeneous equation."
+        "rule_name": "Form Auxiliary Equation",
+        "result": sympy.latex(sympy.Eq(aux_poly, 0)),
+        "explanation": "Replace y by e^{mx} to get the auxiliary polynomial in m."
     })
 
-    roots = sympy.roots(aux_eq_poly, m)
+    # Solve roots with multiplicity
+    roots = sympy.roots(sympy.simplify(sympy.expand(aux_poly)), m)
     steps.append({
-        "rule_name": "Find the Roots",
+        "rule_name": "Find Roots of Auxiliary Polynomial",
         "result": f"m = {sympy.latex(list(roots.keys()))}",
-        "explanation": "Solve the polynomial for its roots."
+        "explanation": "Find roots and multiplicities to construct the complementary function."
     })
 
+    # Construct complementary function
     cf_terms = []
-    processed_roots = []
-    sorted_roots = sorted(roots.keys(), key=lambda r: (sympy.re(r), sympy.im(r)))
     c_idx = 0
-    for root in sorted_roots:
-        if root in processed_roots:
-            continue
-        multiplicity = roots[root]
-        conjugate_root = sympy.conjugate(root)
-        if conjugate_root != root and conjugate_root in roots and roots[conjugate_root] == multiplicity:
-            alpha, beta = sympy.re(root), sympy.im(root)
-            for i in range(multiplicity):
-                term = sympy.exp(alpha * x) * (x**i) * (C_symbols[c_idx] * sympy.cos(beta * x) + C_symbols[c_idx + 1] * sympy.sin(beta * x))
+    processed = set()
+    for root, mult in roots.items():
+        # handle complex conjugate pairs by real sine/cosine form
+        if sympy.im(root) != 0:
+            # root = alpha + i beta
+            alpha = sympy.re(root)
+            beta = sympy.im(root)
+            for i in range(mult):
+                A = C_symbols[c_idx]; B = C_symbols[c_idx+1]
+                term = sympy.exp(alpha*x) * x**i * (A*sympy.cos(beta*x) + B*sympy.sin(beta*x))
                 cf_terms.append(term)
                 c_idx += 2
-            processed_roots.extend([root, conjugate_root])
-        else: # Real root
-            for i in range(multiplicity):
-                term = C_symbols[c_idx] * (x**i) * sympy.exp(root * x)
+        else:
+            for i in range(mult):
+                A = C_symbols[c_idx]
+                term = A * x**i * sympy.exp(root*x)
                 cf_terms.append(term)
                 c_idx += 1
-            processed_roots.append(root)
 
     complementary_function = sum(cf_terms) if cf_terms else sympy.Integer(0)
     steps.append({
-        "rule_name": "Construct the Complementary Function",
-        "result": f"y_c = {sympy.latex(complementary_function)}",
-        "explanation": "Construct y_c from the roots of the auxiliary equation."
+        "rule_name": "Complementary Function (y_c)",
+        "result": sympy.latex(sympy.Eq(sympy.Function('y')(x), complementary_function)),
+        "explanation": "Construct y_c from auxiliary roots."
     })
 
-    # --- Part 2: Find the Particular Integral (PI) ---
-    if rhs_fx == 0:
+    # If RHS is 0 -> purely homogeneous
+    rhs_simp = sympy.simplify(rhs_fx)
+    if rhs_simp == 0:
         final_solution = sympy.Eq(y, complementary_function)
         steps.append({
-            "rule_name": "General Solution (Homogeneous)",
+            "rule_name": "Homogeneous Solution",
             "result": sympy.latex(final_solution),
-            "explanation": "For a homogeneous equation, the general solution is the complementary function."
+            "explanation": "No forcing term; general solution is the complementary function."
         })
         return {"solution_summary": sympy.latex(final_solution), "steps": steps}
 
-    steps.append({
-        "rule_name": "Step 2: Find the Particular Integral (y_p)",
-        "result": "Now, find a particular solution y_p for the non-homogeneous equation.",
-        "explanation": "We use the Method of Undetermined Coefficients based on the form of the right-hand side, f(x)."
-    })
-
-    pi_guess = sympy.sympify(0)
-    rhs_simp = sympy.simplify(rhs_fx)
-    
+    # Build a particular integral guess (simple heuristics)
+    pi_guess = sympy.Integer(0)
+    # polynomial RHS
     if rhs_simp.is_polynomial(x):
-        degree = sympy.degree(rhs_simp, x)
-        coeffs_A = [sympy.Symbol(f'A{i}') for i in range(degree + 1)]
-        pi_guess = sum(coeffs_A[i] * x**i for i in range(degree + 1))
+        deg = sympy.degree(rhs_simp, x)
+        As = sympy.symbols(f'A0:{deg+1}')
+        pi_guess = sum(As[i]*x**i for i in range(deg+1))
+    # exponential factor present?
     elif any(node.func == sympy.exp for node in sympy.preorder_traversal(rhs_simp)):
-        exp_term = next(node for node in sympy.preorder_traversal(rhs_simp) if node.func == sympy.exp)
-        pi_guess = sympy.Symbol('A') * exp_term
+        # multiply by polynomial if needed; handle single exp term
+        exp_node = next(node for node in sympy.preorder_traversal(rhs_simp) if node.func == sympy.exp)
+        A = sympy.Symbol('A')
+        pi_guess = A * exp_node
+    # trig present?
     elif any(isinstance(node, (sympy.sin, sympy.cos)) for node in sympy.preorder_traversal(rhs_simp)):
-        trig_node = next(node for node in sympy.preorder_traversal(rhs_simp) if isinstance(node, (sympy.sin, sympy.cos)))
-        arg = trig_node.args[0]
+        trig = next(node for node in sympy.preorder_traversal(rhs_simp) if isinstance(node, (sympy.sin, sympy.cos)))
+        arg = trig.args[0]
         A, B = sympy.symbols('A B')
-        pi_guess = A * sympy.cos(arg) + B * sympy.sin(arg)
+        pi_guess = A*sympy.cos(arg) + B*sympy.sin(arg)
     else:
-        pi_guess = sympy.Symbol('A') * rhs_simp
+        # generic fallback: A * f(x)
+        A = sympy.Symbol('A')
+        pi_guess = A * rhs_simp
 
-    # Modify guess for duplication with CF roots
-    # A simple check: if the "root" of the guess is a root of the aux equation
+    # Handle duplication: if part of pi_guess matches any term in complementary_function, multiply by x^s
     s = 0
-    if any(node.func == sympy.exp for node in sympy.preorder_traversal(pi_guess)):
-        k = pi_guess.expand().coeff(sympy.exp).args[0].coeff(x)
-        if k in roots: s = roots[k]
-    elif pi_guess.is_polynomial(x) and 0 in roots:
-        s = roots[0]
-    
+    # check for simple duplication when pi_guess contains exp(k x)
+    for node in sympy.preorder_traversal(pi_guess):
+        if node.func == sympy.exp:
+            k = sympy.simplify(node.args[0]).coeff(x, 1)
+            # check if m = k is a root of auxiliary polynomial
+            if k in roots:
+                s = max(s, roots[k])
     if s > 0:
-        original_guess_latex = sympy.latex(pi_guess)
-        pi_guess *= (x**s)
-        steps.append({
-            "rule_name": "Modify Guess for Duplication",
-            "result": f"y_p = {sympy.latex(pi_guess)}",
-            "explanation": f"The initial guess {original_guess_latex} duplicates a term in y_c. Multiply by x^{s}."
-        })
-    
+        pi_guess = pi_guess * x**s
+
     steps.append({
-        "rule_name": "Guess the Form of y_p",
-        "result": f"y_p = {sympy.latex(pi_guess)}",
-        "explanation": f"Based on f(x) = {sympy.latex(rhs_simp)}, we guess the form of the particular solution."
+        "rule_name": "Particular Integral Guess",
+        "result": sympy.latex(pi_guess),
+        "explanation": f"Guess form based on f(x) = {sympy.latex(rhs_simp)}."
     })
 
-    def apply_operator(expr):
-        res = lhs_op_expr
-        for n in range(max_order, -1, -1):
-            deriv_y = y.diff(x, n) if n > 0 else y
-            deriv_expr = expr.diff(x, n)
-            res = res.subs(deriv_y, deriv_expr)
+    # Apply operator to the guess: replace y^(n) by derivative(pi_guess, n)
+    def apply_op_to(expr_guess):
+        res = sympy.Integer(0)
+        for n in range(0, max_order+1):
+            deriv_term = y.diff(x, n) if n > 0 else y
+            coeff = lhs_op.expand().coeff(deriv_term, 1)
+            if coeff != 0:
+                res += coeff * sympy.diff(expr_guess, x, n)
         return sympy.simplify(res)
 
-    eq_for_coeffs = apply_operator(pi_guess) - rhs_simp
-    undetermined_coeffs = sorted(list(pi_guess.free_symbols - {x}), key=str)
-    
-    # Robustly solve for coefficients
-    basis = set()
-    for term in sympy.Add.make_args(eq_for_coeffs.expand()):
-        func_part = sympy.S(1)
-        for factor in sympy.Mul.make_args(term):
-            if not any(c in factor.free_symbols for c in undetermined_coeffs):
-                func_part *= factor
-        basis.add(func_part)
-    
-    equations = [sympy.Eq(eq_for_coeffs.expand().coeff(b), 0) for b in basis]
-    solved_coeffs_list = sympy.solve(equations, undetermined_coeffs, dict=True)
-    solved_coeffs = solved_coeffs_list[0] if solved_coeffs_list else {}
+    eq_for_coeffs = sympy.simplify(apply_op_to(pi_guess) - rhs_simp)
+
+    # unknown symbols in pi_guess
+    undet = sorted([s for s in pi_guess.free_symbols if s != x], key=lambda s: str(s))
+
+    solved_coeffs = {}
+    if undet:
+        # try symbolic solve first
+        try:
+            sol = sympy.solve(sympy.Eq(sympy.simplify(eq_for_coeffs), 0), undet, dict=True)
+            if sol:
+                solved_coeffs = sol[0] if isinstance(sol, list) else sol
+            else:
+                # build linear equations by matching basis functions
+                expr_expanded = sympy.simplify(sympy.expand_trig(eq_for_coeffs))
+                eqs = []
+                # match trig/exp atoms explicitly
+                for a in sorted(expr_expanded.atoms(sympy.sin, sympy.cos, sympy.exp), key=str):
+                    coeff_a = sympy.simplify(expr_expanded.coeff(a, 1))
+                    eqs.append(sympy.Eq(coeff_a, 0))
+                # polynomial coefficients up to degree 10
+                for k in range(0, 11):
+                    coeff_k = sympy.simplify(sympy.expand(expr_expanded).coeff(x, k))
+                    if coeff_k != 0:
+                        eqs.append(sympy.Eq(coeff_k, 0))
+                # remove duplicate equations
+                uniq = []
+                seen = set()
+                for e in eqs:
+                    key = sympy.simplify(e.lhs)
+                    if key not in seen:
+                        uniq.append(e)
+                        seen.add(key)
+                sol2 = sympy.solve(uniq, undet, dict=True)
+                if sol2:
+                    solved_coeffs = sol2[0] if isinstance(sol2, list) else sol2
+                else:
+                    # numeric fallback (least-squares)
+                    vars_sym = undet
+                    pts = [0, 1, 2, 3, 5, 7, 11][:max(3, len(vars_sym)+1)]
+                    import numpy as _np
+                    A = []
+                    b = []
+                    for pt in pts:
+                        val = sympy.N(expr_expanded.subs(x, pt))
+                        row = []
+                        for v in vars_sym:
+                            coeff_v = float(sympy.N(sympy.expand(val).coeff(v, 1)))
+                            row.append(coeff_v)
+                        const_term = float(sympy.N(val - sum(v*sympy.N(sympy.expand(val).coeff(v, 1)) for v in vars_sym)))
+                        A.append(row)
+                        b.append(-const_term)
+                    A = _np.array(A, dtype=float)
+                    b = _np.array(b, dtype=float)
+                    sol_num, *_ = _np.linalg.lstsq(A, b, rcond=None)
+                    solved_coeffs = {vars_sym[i]: sympy.nsimplify(sol_num[i]) for i in range(len(vars_sym))}
+        except Exception:
+            solved_coeffs = {}
+    else:
+        if sympy.simplify(eq_for_coeffs) != 0:
+            raise ValueError("Guessed particular form does not satisfy the equation; no undetermined coefficients found to adjust.")
 
     particular_integral = sympy.simplify(pi_guess.subs(solved_coeffs))
     steps.append({
-        "rule_name": "Solve for Coefficients",
-        "result": f"y_p = {sympy.latex(particular_integral)}",
-        "explanation": f"Substitute y_p into the original equation to find the unknown coefficients: {sympy.latex(solved_coeffs)}."
+        "rule_name": "Particular Integral (y_p)",
+        "result": sympy.latex(particular_integral),
+        "explanation": f"Solved undetermined coefficients: {sympy.latex(solved_coeffs)}."
     })
 
-    # --- Part 3: Combine for General Solution ---
     final_solution = sympy.Eq(y, complementary_function + particular_integral)
     steps.append({
-        "rule_name": "Step 3: Construct the General Solution (y = y_c + y_p)",
+        "rule_name": "General Solution",
         "result": sympy.latex(final_solution),
-        "explanation": "The full general solution is the sum of the complementary function and the particular integral."
+        "explanation": "Sum of complementary function and particular integral."
     })
 
     return {"solution_summary": sympy.latex(final_solution), "steps": steps}
 
 
+
 # --- REPLACED: helper detection function ----------------------------------
 
+# ===== REPLACEMENT: _is_linear_constant_coeff =====
 def _is_linear_constant_coeff(eq, y, x):
-    """Checks if an equation is a linear ODE with constant coefficients."""
+    """
+    Heuristic check whether `eq` (sympy.Eq) is a linear ODE with constant coefficients.
+    Returns True if:
+      - the equation is linear in y and its derivatives (no y**2, y*y', sin(y), etc.)
+      - the coefficients multiplying y, y', y'', ... do NOT contain x or y (i.e., are constants)
+    This function is conservative (may return False on some valid cases) but avoids false positives.
+    """
     try:
-        rearranged = (eq.lhs - eq.rhs).expand()
-        
-        # Check for non-linear terms like y**2, y*y', sin(y)
-        y_and_derivs = [y] + [y.diff(x, i) for i in range(1, 10)]
-        if not rearranged.is_polynomial(*y_and_derivs):
-            return False # Contains things like sin(y), exp(y)
-        if any(sympy.degree(rearranged, d) > 1 for d in y_and_derivs):
-            return False # Contains powers like y**2 or (y')**2
+        expr = (eq.lhs - eq.rhs).expand()
 
-        has_derivative = False
-        for n in range(1, 21): # Check for derivatives from order 1 up
-            deriv = y.diff(x, n)
-            c = rearranged.coeff(deriv, 1)
-            if c != 0:
-                has_derivative = True
-                if x in c.free_symbols or y.func in c.free_symbols:
+        # Reject obvious nonlinearities: powers of y or functions of y
+        # If any node contains y inside non-linear context (like sin(y) or y**2) -> fail
+        for node in expr.preorder_traversal():
+            # sin(y), exp(y), y**2, etc. — if node has y as free symbol but node is not a linear factor
+            if node.has(y):
+                # Accept only if node is exactly y or Derivative(y,x,...) or a symbol times those
+                if isinstance(node, sympy.Derivative):
+                    continue
+                if node == y:
+                    continue
+                # if it's a Mul containing only a symbol/constant and y/derivative, that's okay;
+                # otherwise it's nonlinear
+                if isinstance(node, sympy.Mul):
+                    factors = sympy.Mul.make_args(node)
+                    ok = True
+                    for f in factors:
+                        if f.has(y) and not (f == y or isinstance(f, sympy.Derivative)):
+                            ok = False
+                            break
+                    if ok:
+                        continue
+                # anything else that contains y (like sin(y), y**2, (y')**2) -> nonlinear
+                return False
+
+        # Now check coefficients of derivatives: they must be constant (no x, no y)
+        found_derivative = False
+        # check up to a reasonable order (say 10)
+        for n in range(0, 11):
+            term = y.diff(x, n) if n > 0 else y
+            coeff = sympy.simplify(expr.coeff(term, 1))
+            if coeff != 0:
+                found_derivative = True
+                # coefficient must be free of x and of y-related symbols
+                if x in coeff.free_symbols:
                     return False
-        
-        # Check coefficient of y itself
-        c0 = rearranged.coeff(y, 1)
-        if x in c0.free_symbols or y.func in c0.free_symbols:
-            return False
-            
-        return has_derivative
+                # also ensure coefficient does not use y.func (i.e., function symbol)
+                if any(s.name == y.func.__name__ for s in coeff.free_symbols if hasattr(s, 'name')):
+                    return False
+
+        return found_derivative
     except Exception:
         return False
+
 
 
 # --- Helper: linear first-order check -------------------------------------
