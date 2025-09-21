@@ -328,78 +328,88 @@ def _solve_linear_constant_coeff_step_by_step(eq, y, x):
     C_symbols = [sympy.Symbol(f'C{i+1}') for i in range(10)]
 
     # --- Part 1: Find the Complementary Function (CF) ---
-    lhs = eq.lhs
-    rhs = eq.rhs
+    rearranged = eq.lhs - eq.rhs
+    lhs_op_expr = sympy.S(0)
+    rhs_fx = sympy.S(0)
 
-    # Build auxiliary polynomial robustly by collecting coefficients for y, y', y'', ...
+    for term in sympy.Add.make_args(rearranged.expand()):
+        if term.has(y):
+            lhs_op_expr += term
+        else:
+            rhs_fx -= term # Move non-y terms to the right-hand side
+
     m = sympy.Symbol('m')
-    coeffs = {}
     max_order = 0
-    for n in range(0, 21):  # check up to 20th order
+    y_derivs = [y.diff(x, n) for n in range(20, -1, -1)]
+    for deriv in y_derivs:
+        if lhs_op_expr.has(deriv):
+            max_order = len(deriv.args) - 1 if isinstance(deriv, sympy.Derivative) else 0
+            break
+            
+    aux_poly_terms = []
+    for n in range(max_order, -1, -1):
         deriv = y.diff(x, n) if n > 0 else y
-        c = sympy.simplify(lhs.coeff(deriv, 1))
-        if c != 0:
-            # ensure coefficient is constant (no x or y symbols)
-            if c.free_symbols:
-                # not constant coefficient; abort specialized solver
-                raise ValueError("Non-constant coefficient found; this solver expects constant coefficients.")
-            coeffs[n] = sympy.simplify(c)
-            max_order = max(max_order, n)
+        coeff = lhs_op_expr.expand().coeff(deriv)
+        if x in coeff.free_symbols or y.func in coeff.free_symbols:
+            raise ValueError(f"Non-constant coefficient '{coeff}' found.")
+        if coeff != 0:
+            aux_poly_terms.append(coeff * m**n)
 
-    if max_order == 0 and rhs != 0:
-        # No derivative terms found -> not a linear ODE in expected form
-        raise ValueError("No derivative terms found; cannot form auxiliary equation.")
+    if not aux_poly_terms:
+        raise ValueError("Could not form an auxiliary equation.")
 
-    # form polynomial a_n m^n + ... + a_0
-    aux_eq_poly = sum(coeffs.get(n, 0) * m**n for n in range(0, max_order + 1))
+    aux_eq_poly = sum(aux_poly_terms)
     aux_eq = sympy.Eq(aux_eq_poly, 0)
     steps.append({
-        "rule_name": "Step 1: Find the Complementary Function (CF)",
-        "result": "First, solve the homogeneous equation: " + sympy.latex(sympy.Eq(lhs, 0)),
+        "rule_name": "Step 1: Find the Complementary Function (y_c)",
+        "result": "First, solve the homogeneous equation: " + sympy.latex(sympy.Eq(lhs_op_expr, 0)),
         "explanation": "The general solution is y = y_c + y_p, where y_c is the Complementary Function and y_p is the Particular Integral."
     })
     steps.append({
         "rule_name": "Form the Auxiliary Equation",
         "result": sympy.latex(aux_eq),
-        "explanation": "Substitute y = e^(m x) into the homogeneous equation."
+        "explanation": "Substitute y = e^(mx) into the homogeneous equation."
     })
 
-    # Get roots (with multiplicity)
-    poly_m = sympy.Poly(aux_eq_poly, m)
-    roots = sympy.roots(poly_m)
+    roots = sympy.roots(aux_eq_poly, m)
     steps.append({
         "rule_name": "Find the Roots",
         "result": f"m = {sympy.latex(list(roots.keys()))}",
         "explanation": "Solve the polynomial for its roots."
     })
 
-    # Construct complementary function
     cf_terms = []
-    root_index = 0
-    for root, multiplicity in roots.items():
-        root_s = sympy.simplify(root)
-        if sympy.im(root_s) == 0:  # Real root
+    processed_roots = []
+    sorted_roots = sorted(roots.keys(), key=lambda r: (sympy.re(r), sympy.im(r)))
+    c_idx = 0
+    for root in sorted_roots:
+        if root in processed_roots:
+            continue
+        multiplicity = roots[root]
+        conjugate_root = sympy.conjugate(root)
+        if conjugate_root != root and conjugate_root in roots and roots[conjugate_root] == multiplicity:
+            alpha, beta = sympy.re(root), sympy.im(root)
             for i in range(multiplicity):
-                cf_terms.append(C_symbols[root_index] * (x**i) * sympy.exp(root_s * x))
-                root_index += 1
-        else:  # Complex roots (handle conjugate pairs)
-            alpha = sympy.re(root_s)
-            beta = sympy.im(root_s)
-            # For each multiplicity, we produce cos and sin terms multiplied by x^k
-            for i in range(multiplicity):
-                term = sympy.exp(alpha * x) * (C_symbols[root_index] * sympy.cos(beta * x) + C_symbols[root_index + 1] * sympy.sin(beta * x)) * (x**i)
+                term = sympy.exp(alpha * x) * (x**i) * (C_symbols[c_idx] * sympy.cos(beta * x) + C_symbols[c_idx + 1] * sympy.sin(beta * x))
                 cf_terms.append(term)
-                root_index += 2
+                c_idx += 2
+            processed_roots.extend([root, conjugate_root])
+        else: # Real root
+            for i in range(multiplicity):
+                term = C_symbols[c_idx] * (x**i) * sympy.exp(root * x)
+                cf_terms.append(term)
+                c_idx += 1
+            processed_roots.append(root)
 
     complementary_function = sum(cf_terms) if cf_terms else sympy.Integer(0)
     steps.append({
         "rule_name": "Construct the Complementary Function",
         "result": f"y_c = {sympy.latex(complementary_function)}",
-        "explanation": "Construct the CF from the roots of the auxiliary equation."
+        "explanation": "Construct y_c from the roots of the auxiliary equation."
     })
 
     # --- Part 2: Find the Particular Integral (PI) ---
-    if rhs == 0:
+    if rhs_fx == 0:
         final_solution = sympy.Eq(y, complementary_function)
         steps.append({
             "rule_name": "General Solution (Homogeneous)",
@@ -408,148 +418,83 @@ def _solve_linear_constant_coeff_step_by_step(eq, y, x):
         })
         return {"solution_summary": sympy.latex(final_solution), "steps": steps}
 
-    # Non-homogeneous case: Method of Undetermined Coefficients (basic support)
     steps.append({
-        "rule_name": "Step 2: Find the Particular Integral (PI)",
+        "rule_name": "Step 2: Find the Particular Integral (y_p)",
         "result": "Now, find a particular solution y_p for the non-homogeneous equation.",
-        "explanation": "We will use the Method of Undetermined Coefficients based on the form of the right-hand side, f(x)."
+        "explanation": "We use the Method of Undetermined Coefficients based on the form of the right-hand side, f(x)."
     })
 
-    # Guess the form of the PI (simple heuristics: polynomial, exp, trig, or product)
     pi_guess = sympy.sympify(0)
-
-    # Convert rhs to a simplified form for pattern checking
-    rhs_simp = sympy.simplify(rhs)
-
-    # Polynomial
+    rhs_simp = sympy.simplify(rhs_fx)
+    
     if rhs_simp.is_polynomial(x):
         degree = sympy.degree(rhs_simp, x)
         coeffs_A = [sympy.Symbol(f'A{i}') for i in range(degree + 1)]
         pi_guess = sum(coeffs_A[i] * x**i for i in range(degree + 1))
-
-    # Exponential term containing exp(k*x)
-    elif any([func.has(sympy.exp) for func in sympy.preorder_traversal(rhs_simp)]):
-        # Attempt to extract exp(k*x) factor; fallback to a single coefficient times rhs
-        exp_factors = [node for node in sympy.preorder_traversal(rhs_simp) if node.func == sympy.exp]
-        if exp_factors:
-            exp_term = exp_factors[0]
-            A = sympy.Symbol('A')
-            # if exp_term is e^{k*x}, guess A*e^{k*x}
-            pi_guess = A * exp_term
-        else:
-            pi_guess = sympy.Symbol('A') * rhs_simp
-
-    # Trigonometric sin/cos
-    elif any([isinstance(node, sympy.sin) or isinstance(node, sympy.cos) for node in sympy.preorder_traversal(rhs_simp)]):
-        trig_nodes = [node for node in sympy.preorder_traversal(rhs_simp) if isinstance(node, (sympy.sin, sympy.cos))]
-        trig = trig_nodes[0]
-        # argument should be k*x typically
-        arg = trig.args[0]
-        k = arg.coeff(x) if arg.has(x) else sympy.Integer(1)
+    elif any(node.func == sympy.exp for node in sympy.preorder_traversal(rhs_simp)):
+        exp_term = next(node for node in sympy.preorder_traversal(rhs_simp) if node.func == sympy.exp)
+        pi_guess = sympy.Symbol('A') * exp_term
+    elif any(isinstance(node, (sympy.sin, sympy.cos)) for node in sympy.preorder_traversal(rhs_simp)):
+        trig_node = next(node for node in sympy.preorder_traversal(rhs_simp) if isinstance(node, (sympy.sin, sympy.cos)))
+        arg = trig_node.args[0]
         A, B = sympy.symbols('A B')
-        pi_guess = A * sympy.cos(k * x) + B * sympy.sin(k * x)
-
+        pi_guess = A * sympy.cos(arg) + B * sympy.sin(arg)
     else:
-        # Fallback: use undetermined coefficient multiplying the RHS directly
-        A = sympy.Symbol('A')
-        pi_guess = A * rhs_simp
+        pi_guess = sympy.Symbol('A') * rhs_simp
 
+    # Modify guess for duplication with CF roots
+    # A simple check: if the "root" of the guess is a root of the aux equation
+    s = 0
+    if any(node.func == sympy.exp for node in sympy.preorder_traversal(pi_guess)):
+        k = pi_guess.expand().coeff(sympy.exp).args[0].coeff(x)
+        if k in roots: s = roots[k]
+    elif pi_guess.is_polynomial(x) and 0 in roots:
+        s = roots[0]
+    
+    if s > 0:
+        original_guess_latex = sympy.latex(pi_guess)
+        pi_guess *= (x**s)
+        steps.append({
+            "rule_name": "Modify Guess for Duplication",
+            "result": f"y_p = {sympy.latex(pi_guess)}",
+            "explanation": f"The initial guess {original_guess_latex} duplicates a term in y_c. Multiply by x^{s}."
+        })
+    
     steps.append({
         "rule_name": "Guess the Form of y_p",
         "result": f"y_p = {sympy.latex(pi_guess)}",
         "explanation": f"Based on f(x) = {sympy.latex(rhs_simp)}, we guess the form of the particular solution."
     })
 
-    # Check for duplication of any term in CF; if duplicated, multiply guess by x^s until independent
-    def _term_equivalent_to_cf_term(pi_term, cf_term):
-        # Rough heuristic: compare functional structure after replacing constants with 1
-        symbols_in_pi = list(pi_term.atoms(sympy.Symbol))
-        subs_map = {s: 1 for s in symbols_in_pi}
-        try:
-            simplified_ratio = sympy.simplify((pi_term.subs(subs_map)) / (cf_term.subs({c: 1 for c in C_symbols})))
-            return simplified_ratio.is_constant
-        except Exception:
-            return False
+    def apply_operator(expr):
+        res = lhs_op_expr
+        for n in range(max_order, -1, -1):
+            deriv_y = y.diff(x, n) if n > 0 else y
+            deriv_expr = expr.diff(x, n)
+            res = res.subs(deriv_y, deriv_expr)
+        return sympy.simplify(res)
 
-    # If pi_guess is a sum, inspect each summand
-    multiplied = False
-    for cf_t in cf_terms:
-        # try to detect duplication; we apply a simpler check: if their functional forms share the same base (exp/cos/sin/polynomial)
-        try:
-            # if pi_guess and cf_t share same exponential/trig base, we consider duplication
-            if (sympy.simplify(sympy.exp(0) * pi_guess).has(sympy.exp) and cf_t.has(sympy.exp)) or \
-               (pi_guess.has(sympy.cos) or pi_guess.has(sympy.sin)) and (cf_t.has(sympy.cos) or cf_t.has(sympy.sin)) or \
-               (pi_guess.is_polynomial(x) and cf_t.is_polynomial(x)):
-                pi_guess = pi_guess * x
-                multiplied = True
-                steps.append({
-                    "rule_name": "Modify Guess for Duplication",
-                    "result": f"y_p = {sympy.latex(pi_guess)}",
-                    "explanation": "The initial guess duplicates a term in the CF. Multiply the guess by x."
-                })
-                break
-        except Exception:
-            continue
+    eq_for_coeffs = apply_operator(pi_guess) - rhs_simp
+    undetermined_coeffs = sorted(list(pi_guess.free_symbols - {x}), key=str)
+    
+    # Robustly solve for coefficients
+    basis = set()
+    for term in sympy.Add.make_args(eq_for_coeffs.expand()):
+        func_part = sympy.S(1)
+        for factor in sympy.Mul.make_args(term):
+            if not any(c in factor.free_symbols for c in undetermined_coeffs):
+                func_part *= factor
+        basis.add(func_part)
+    
+    equations = [sympy.Eq(eq_for_coeffs.expand().coeff(b), 0) for b in basis]
+    solved_coeffs_list = sympy.solve(equations, undetermined_coeffs, dict=True)
+    solved_coeffs = solved_coeffs_list[0] if solved_coeffs_list else {}
 
-    # Solve for the coefficients by substituting y = pi_guess into the LHS and equating to RHS
-    # Build operator on y: compute L[y_p] where L is the linear operator represented by lhs
-    # To evaluate, we create an expression: lhs_expr.subs(y, pi_guess) but lhs may contain derivatives
-    # We'll replace occurrences of y.diff(x, n) with pi_guess.diff(x, n)
-    substituted_lhs = lhs
-    for n in range(0, max_order + 1):
-        deriv = y.diff(x, n) if n > 0 else y
-        substituted_lhs = substituted_lhs.subs(deriv, sympy.diff(pi_guess, x, n))
-
-    # Form equation for coefficients
-    eq_for_coeffs = sympy.simplify(substituted_lhs - rhs_simp)
-    # Unknown symbols in pi_guess
-    undetermined_coeffs = sorted(list(pi_guess.free_symbols), key=lambda s: str(s))
-    # Remove x and known constants from undetermined set if present
-    undetermined_coeffs = [s for s in undetermined_coeffs if s != x and not str(s).startswith('C')]
-
-    solved_coeffs = {}
-    if undetermined_coeffs:
-        # Convert eq_for_coeffs into a polynomial (in x) or equate coefficients by expanding trig/exponent if possible.
-        try:
-            # Attempt to collect coefficients by matching powers of x
-            # Build equations by equating coefficients of linearly independent functions if possible
-            # Use sympy.solve for the system
-            # For robust handling, sample enough points and solve linear system for unknowns (works for linear undetermined coefficient problems)
-            vars_symbols = undetermined_coeffs
-            # Create linear equations by comparing coefficients for a basis of functions (monomials, sin/cos, exp)
-            # Fallback: solve by matching coefficients as equations by expanding series at enough points
-            # We'll try to expand eq_for_coeffs and equate to zero by collecting coefficients for x powers
-            equations = []
-            # Try matching coefficients of x up to degree 10
-            for k in range(0, 11):
-                coeff_k = sympy.simplify(sympy.expand(eq_for_coeffs).coeff(x, k))
-                equations.append(sympy.Eq(coeff_k, 0))
-            # Also include constant equation when k=0 already included
-            # Solve the linear system
-            solved_coeffs = sympy.solve(equations, vars_symbols, dict=True)
-            if isinstance(solved_coeffs, list) and solved_coeffs:
-                solved_coeffs = solved_coeffs[0]
-            elif solved_coeffs is None:
-                solved_coeffs = {}
-        except Exception:
-            # Fallback to direct solve of eq_for_coeffs (may work for simple exponential/trig forms)
-            try:
-                solved_coeffs = sympy.solve(eq_for_coeffs, undetermined_coeffs, dict=True)
-                if isinstance(solved_coeffs, list) and solved_coeffs:
-                    solved_coeffs = solved_coeffs[0]
-            except Exception:
-                solved_coeffs = {}
-    else:
-        # No undetermined coefficients (rare): check if substitution satisfies equation
-        if sympy.simplify(eq_for_coeffs) != 0:
-            raise ValueError("Failed to find a particular integral using the guessed form.")
-        solved_coeffs = {}
-
-    particular_integral = sympy.simplify(pi_guess.subs(solved_coeffs)) if solved_coeffs else sympy.simplify(pi_guess)
+    particular_integral = sympy.simplify(pi_guess.subs(solved_coeffs))
     steps.append({
         "rule_name": "Solve for Coefficients",
         "result": f"y_p = {sympy.latex(particular_integral)}",
-        "explanation": f"Substitute y_p into the original equation and solve for the unknown coefficients. Found {sympy.latex(solved_coeffs)}."
+        "explanation": f"Substitute y_p into the original equation to find the unknown coefficients: {sympy.latex(solved_coeffs)}."
     })
 
     # --- Part 3: Combine for General Solution ---
@@ -565,22 +510,33 @@ def _solve_linear_constant_coeff_step_by_step(eq, y, x):
 
 # --- REPLACED: helper detection function ----------------------------------
 
-def _is_linear_constant_coeff(eq, y):
+def _is_linear_constant_coeff(eq, y, x):
     """Checks if an equation is a linear ODE with constant coefficients."""
     try:
         rearranged = (eq.lhs - eq.rhs).expand()
-        # Quick test: RHS must be 0 or a purely function of x (non-homog allowed)
-        # We'll allow non-homogeneous since our solver handles both; here we only check coefficients.
-        # Collect coefficients for derivative orders
-        for n in range(0, 21):
-            deriv = y.diff(sympy.Symbol('x'), n) if n > 0 else y
+        
+        # Check for non-linear terms like y**2, y*y', sin(y)
+        y_and_derivs = [y] + [y.diff(x, i) for i in range(1, 10)]
+        if not rearranged.is_polynomial(*y_and_derivs):
+            return False # Contains things like sin(y), exp(y)
+        if any(sympy.degree(rearranged, d) > 1 for d in y_and_derivs):
+            return False # Contains powers like y**2 or (y')**2
+
+        has_derivative = False
+        for n in range(1, 21): # Check for derivatives from order 1 up
+            deriv = y.diff(x, n)
             c = rearranged.coeff(deriv, 1)
             if c != 0:
-                # if coefficient depends on x or y, it's not constant-coeff
-                if c.free_symbols:
+                has_derivative = True
+                if x in c.free_symbols or y.func in c.free_symbols:
                     return False
-        # If we reached here, no non-constant coefficient found (or zero equation) => likely constant coefficient
-        return True
+        
+        # Check coefficient of y itself
+        c0 = rearranged.coeff(y, 1)
+        if x in c0.free_symbols or y.func in c0.free_symbols:
+            return False
+            
+        return has_derivative
     except Exception:
         return False
 
@@ -651,7 +607,7 @@ def solve_differential_equation(expression_str: str):
         # --- CLASSIFICATION CHAIN ---
 
         # NEW: Check for Linear with Constant Coefficients (handles homogeneous & simple non-homogeneous)
-        if _is_linear_constant_coeff(equation, y):
+        if _is_linear_constant_coeff(equation, y, x):
             # This solver handles both homogeneous and simple non-homogeneous forms using undetermined coefficients
             return _solve_linear_constant_coeff_step_by_step(equation, y, x)
 
